@@ -45,6 +45,7 @@ import (
 	internalmodels "github.com/google/osv.dev/go/internal/models"
 	"github.com/google/osv.dev/go/logger"
 	"golang.org/x/sync/errgroup"
+	pb "osv.dev/bindings/go/api"
 )
 
 const (
@@ -56,6 +57,14 @@ const (
 	maxConcurrency     = 32 // Adjust based on machine limits
 	batchSize          = 500
 )
+
+// LinterSummary holds aggregated linter metrics across all processed sources.
+type LinterSummary struct {
+	TotalRecords int            `json:"total_records"`
+	Sources      map[string]int `json:"sources"`
+	Findings     map[string]int `json:"findings"`
+	LastUpdated  time.Time      `json:"last_updated"`
+}
 
 var errorCodeMapping = map[string]internalmodels.ImportFindings{
 	"SCH:001": internalmodels.ImportFindingsInvalidJSON,
@@ -389,6 +398,42 @@ func processLinterResult(ctx context.Context, store internalmodels.ImportFinding
 		findingsToPut = append(findingsToPut, finding)
 	}
 
+	sourceCounts := make(map[string]int)
+	findingCounts := make(map[string]int)
+	for _, f := range findingsToPut {
+		if f.Source != "" {
+			sourceCounts[f.Source]++
+		}
+		for _, findingEnum := range f.Findings {
+			if findingName, ok := pb.ImportFindingType_name[int32(findingEnum)]; ok && findingName != "IMPORT_FINDING_TYPE_NONE" {
+				findingCounts[findingName]++
+			}
+		}
+	}
+	summary := LinterSummary{
+		TotalRecords: len(findingsToPut),
+		Sources:      sourceCounts,
+		Findings:     findingCounts,
+		LastUpdated:  now,
+	}
+
+	g.Go(func() error {
+		if dryRun {
+			logger.Info("Dry run: skipping summary upload", slog.Int("total_records", summary.TotalRecords))
+			return nil
+		}
+		summaryData, err := json.MarshalIndent(summary, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal summary: %w", err)
+		}
+		if err := store.UploadSummary(groupCtx, summaryData); err != nil {
+			logger.Error("Failed to upload summary to store", slog.Any("err", err))
+			return nil
+		}
+		logger.Info("Successfully uploaded linter summary")
+		return nil
+	})
+
 	// Launch workers to process findingsToPut
 
 	// Create a channel for batches
@@ -599,7 +644,7 @@ func uploadRecordToStore(ctx context.Context, store internalmodels.ImportFinding
 	var toDelete []string
 	for objName := range existingObjectsMap {
 		relPath, err := filepath.Rel(linterResultDir, objName)
-		if err != nil {
+		if err != nil || relPath == "summary.json" {
 			continue
 		}
 		parts := strings.Split(relPath, string(filepath.Separator))

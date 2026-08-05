@@ -168,6 +168,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /linter/", s.handleLinterPage)
 	s.mux.HandleFunc("GET /linter-findings", s.handleLinterSources)
 	s.mux.HandleFunc("GET /linter-findings/", s.handleLinterSources)
+	s.mux.HandleFunc("GET /linter-findings/summary", s.handleLinterSummary)
 	s.mux.HandleFunc("GET /linter-findings/{source}", s.handleLinterFindings)
 
 	// Triage workflow

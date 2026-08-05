@@ -4,8 +4,7 @@ import "@github/clipboard-copy-element";
 
 
 document.addEventListener("DOMContentLoaded", function () {
-  let allIssues = [];
-  let issuesByHomeDb = {};
+  let currentSourceIssues = [];
   let filteredIssues = [];
   let findingDetails = {};
   let activeVulnData = {};
@@ -38,22 +37,29 @@ document.addEventListener("DOMContentLoaded", function () {
     "findings-filter-options"
   );
 
-  let selectedHomeDb = "";
+  let selectedDb = "";
   let selectedFinding = "";
-  let urlHomeDbApplied = false;
+  let sourceNames = [];
+  let prefixToSource = {};
+  let summaryData = null;
+
+  // Cache for source findings: sourceName -> Array<Issue>
+  const sourceFindingsCache = new Map();
+  // In-flight fetch promises: sourceName -> Promise<Array<Issue>>
+  const inFlightFindingsFetches = new Map();
 
   function applyFiltersFromURL() {
     const params = new URLSearchParams(window.location.search);
-    const homeDb = params.get("homedb");
-    if (homeDb) {
-      selectedHomeDb = homeDb;
+    const db = params.get("homedb");
+    if (db) {
+      selectedDb = db;
     }
   }
 
-  function updateURL(homeDb, replace = false) {
+  function updateURL(db, replace = false) {
     const params = new URLSearchParams(window.location.search);
-    if (homeDb) {
-      params.set("homedb", homeDb);
+    if (db) {
+      params.set("homedb", db);
     } else {
       params.delete("homedb");
     }
@@ -70,103 +76,268 @@ document.addEventListener("DOMContentLoaded", function () {
 
   applyFiltersFromURL();
 
+  // Cache of source names to detailed linter results Promise.
+  const fetchedLinterSources = new Map();
+
+  /**
+   * Lazily fetches and caches detailed GCS linter findings for a given source on demand.
+   * Uses in-flight promise deduplication to prevent duplicate concurrent fetches.
+   * @param {string} sourceName - The ecosystem source name (e.g. "ghsa").
+   * @returns {Promise<void>}
+   */
+  async function ensureLinterFindingsForSource(sourceName) {
+    if (!sourceName) return;
+    if (fetchedLinterSources.has(sourceName)) {
+      return fetchedLinterSources.get(sourceName);
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await fetch(`/linter-findings/${sourceName}`);
+        if (res.ok) {
+          const data = await res.json();
+          for (const path in data) {
+            const bugId = path.split("/").pop().replace(".json", "");
+            if (!findingDetails[bugId]) findingDetails[bugId] = [];
+            findingDetails[bugId].push(...data[path]);
+          }
+        }
+      } catch (e) {
+        console.warn(`Failed to fetch linter source: ${sourceName}`, e);
+        // Allow retrying on subsequent clicks if network request failed
+        fetchedLinterSources.delete(sourceName);
+      }
+    })();
+
+    fetchedLinterSources.set(sourceName, fetchPromise);
+    return fetchPromise;
+  }
+
+  /**
+   * Fetches findings for a single source, using memory cache and in-flight deduplication.
+   * @param {string} sourceName
+   * @returns {Promise<Array<Object>>}
+   */
+  async function fetchSourceFindings(sourceName) {
+    if (!sourceName) return [];
+    if (sourceFindingsCache.has(sourceName)) {
+      return sourceFindingsCache.get(sourceName);
+    }
+    if (inFlightFindingsFetches.has(sourceName)) {
+      return inFlightFindingsFetches.get(sourceName);
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const url = `https://api.test.osv.dev/v1experimental/importfindings/${sourceName}`;
+        const res = await fetch(url);
+        const data = res.ok ? await res.json() : { invalid_records: [] };
+        const records = data.invalid_records || [];
+        sourceFindingsCache.set(sourceName, records);
+        return records;
+      } catch (err) {
+        console.warn(`Failed to fetch findings for source ${sourceName}:`, err);
+        return [];
+      } finally {
+        inFlightFindingsFetches.delete(sourceName);
+      }
+    })();
+
+    inFlightFindingsFetches.set(sourceName, fetchPromise);
+    return fetchPromise;
+  }
+
+  /**
+   * Sets the active source, updates URL, loads data on-demand, and re-filters.
+   * @param {string} sourceName
+   */
+  async function selectSource(sourceName) {
+    if (!sourceName) return;
+    if (selectedDb === sourceName && currentSourceIssues.length > 0) {
+      return;
+    }
+    selectedDb = sourceName;
+    updateURL(selectedDb);
+    updateFilterSelectedLabels();
+
+    dataLoadingComplete = false;
+    displayIssues(); // Show "Loading data..."
+
+    currentSourceIssues = await fetchSourceFindings(selectedDb);
+    dataLoadingComplete = true;
+    updateFilterSelectedLabels();
+    applyFilters();
+  }
+
+  function updateFilterSelectedLabels() {
+    const hasSourceCounts = Boolean(summaryData?.sources && Object.keys(summaryData.sources).length > 0);
+    if (selectedDb) {
+      if (hasSourceCounts && summaryData.sources[selectedDb] !== undefined) {
+        const count = summaryData.sources[selectedDb];
+        homeDbFilterSelected.textContent = `${selectedDb} (${count} issues)`;
+      } else if (currentSourceIssues.length > 0) {
+        homeDbFilterSelected.textContent = `${selectedDb} (${currentSourceIssues.length} issues)`;
+      } else {
+        homeDbFilterSelected.textContent = selectedDb;
+      }
+    } else {
+      homeDbFilterSelected.textContent = "Select Database";
+    }
+
+    if (selectedFinding) {
+      const name = selectedFinding.replace("IMPORT_FINDING_TYPE_", "");
+      const count = summaryData?.findings?.[selectedFinding];
+      findingsFilterSelected.textContent = count !== undefined ? `${name} (${count} issues)` : name;
+    } else {
+      findingsFilterSelected.textContent = "All Findings";
+    }
+  }
+
+  function renderFilterDropdowns() {
+    const hasSourceCounts = Boolean(summaryData?.sources && Object.keys(summaryData.sources).length > 0);
+    const hasFindingCounts = Boolean(summaryData?.findings && Object.keys(summaryData.findings).length > 0);
+
+    // 1. Render Database Options
+    homeDbFilterOptions.innerHTML = "";
+    const sortedSources = [...sourceNames].sort();
+    for (const dbName of sortedSources) {
+      const option = document.createElement("div");
+      option.className = "filter-option";
+      option.dataset.value = dbName;
+      if (hasSourceCounts && summaryData.sources[dbName] !== undefined) {
+        const count = summaryData.sources[dbName];
+        option.dataset.count = count;
+        option.textContent = `${dbName} (${count})`;
+      } else {
+        option.textContent = dbName;
+      }
+      homeDbFilterOptions.appendChild(option);
+    }
+
+    // 2. Render Findings Options
+    findingsFilterOptions.innerHTML = `<div class="filter-option" data-value="" data-name="All Findings">All Findings</div>`;
+    const findingKeys = hasFindingCounts
+      ? Object.keys(summaryData.findings).sort()
+      : [
+          "IMPORT_FINDING_TYPE_INVALID_JSON",
+          "IMPORT_FINDING_TYPE_INVALID_PACKAGE",
+          "IMPORT_FINDING_TYPE_INVALID_PURL",
+          "IMPORT_FINDING_TYPE_INVALID_VERSION",
+          "IMPORT_FINDING_TYPE_INVALID_COMMIT",
+          "IMPORT_FINDING_TYPE_INVALID_RANGE",
+          "IMPORT_FINDING_TYPE_INVALID_RECORD",
+          "IMPORT_FINDING_TYPE_INVALID_ALIASES",
+          "IMPORT_FINDING_TYPE_INVALID_UPSTREAM",
+          "IMPORT_FINDING_TYPE_INVALID_RELATED",
+          "IMPORT_FINDING_TYPE_BAD_ALIASED_CVE",
+        ];
+
+    for (const finding of findingKeys) {
+      const name = finding.replace("IMPORT_FINDING_TYPE_", "");
+      const option = document.createElement("div");
+      option.className = "filter-option";
+      option.dataset.value = finding;
+      option.dataset.name = name;
+      if (hasFindingCounts && summaryData.findings[finding] !== undefined) {
+        const count = summaryData.findings[finding];
+        option.dataset.count = count;
+        option.textContent = `${name} (${count})`;
+      } else {
+        option.textContent = name;
+      }
+      findingsFilterOptions.appendChild(option);
+    }
+
+    updateFilterSelectedLabels();
+  }
+
   async function loadData() {
     globalLoader.classList.add("visible");
 
-    // Get source names from github source_test.yaml file
-    const response = await fetch(
-      "https://raw.githubusercontent.com/google/osv.dev/master/source_test.yaml"
-    );
-    const yamlText = await response.text();
-    const sources = jsyaml.load(yamlText);
-    const sourceNames = sources.map((s) => s.name);
+    // 1. Load source list and summary in parallel
+    const [sourceRes, summaryRes] = await Promise.allSettled([
+      fetch(
+        "https://raw.githubusercontent.com/google/osv.dev/master/source_test.yaml"
+      ),
+      fetch("/linter-findings/summary"),
+    ]);
 
-    // Check if the home database from the URL is not in the source yaml list.
-    // If the queried home database is not in the source list, remove the invalid parameter from the URL.
-    if (selectedHomeDb && !sourceNames.includes(selectedHomeDb)) {
-      selectedHomeDb = "";
-      urlHomeDbApplied = true; // Prevent further checks
-      updateURL("", true);
+    if (sourceRes.status === "fulfilled" && sourceRes.value.ok) {
+      try {
+        const yamlText = await sourceRes.value.text();
+        const sources = jsyaml.load(yamlText);
+        sourceNames = sources.map((s) => s.name);
+        sources.forEach((s) => {
+          if (s.db_prefix && Array.isArray(s.db_prefix)) {
+            s.db_prefix.forEach((p) => {
+              prefixToSource[p.toUpperCase()] = s.name;
+            });
+          }
+        });
+      } catch (e) {
+        console.warn("Failed to parse source_test.yaml", e);
+      }
     }
 
-    processAndDisplayData();
-
-    const allPromises = [];
-
-    // Get the detailed linter results from GCS bucket
-    const linterPromise = (async () => {
+    if (summaryRes.status === "fulfilled" && summaryRes.value.ok) {
       try {
-        const rootRes = await fetch("/linter-findings/");
-        if (rootRes.ok) {
-          const activeSources = await rootRes.json();
-          const sourcesToFetch = sourceNames.filter((name) => activeSources.includes(name));
-          const linterPromises = sourcesToFetch.map((sourceName) => {
-            const url = `/linter-findings/${sourceName}`;
-            return fetch(url)
-              .then((res) => (res.ok ? res.json() : {}))
-              .catch((e) => {
-                  console.warn(`Failed to fetch linter source: ${sourceName}`, e);
-                  return {};
-              });
-          });
-          const linterResults = await Promise.all(linterPromises);
-          linterResults.forEach((data) => {
-            for (const path in data) {
-              const bugId = path.split("/").pop().replace(".json", "");
-              if (!findingDetails[bugId]) findingDetails[bugId] = [];
-              findingDetails[bugId].push(...data[path]);
-            }
+        summaryData = await summaryRes.value.json();
+        if (summaryData?.sources) {
+          Object.keys(summaryData.sources).forEach((src) => {
+            if (!sourceNames.includes(src)) sourceNames.push(src);
           });
         }
       } catch (e) {
-        console.error("Failed to fetch active linter sources", e);
+        console.warn("Failed to parse summary.json", e);
       }
-    })();
-    allPromises.push(linterPromise);
+    }
 
-    // Get the import finding code from the API
-    const issuePromises = sourceNames.map((sourceName) => {
-      const url = `https://api.test.osv.dev/v1experimental/importfindings/${sourceName}`;
-      return fetch(url)
-        .then((res) => (res.ok ? res.json() : { invalid_records: [] }))
-        .then((data) => {
-          const records = data.invalid_records || [];
-          allIssues.push(...records);
-          records.forEach((issue) => {
-            if (!issuesByHomeDb[issue.source]) {
-              issuesByHomeDb[issue.source] = [];
-            }
-            issuesByHomeDb[issue.source].push(issue);
-          });
+    // 2. Determine initial selected database
+    if (selectedDb && !sourceNames.includes(selectedDb)) {
+      selectedDb = "";
+      updateURL("", true);
+    }
 
-          if (selectedHomeDb && !urlHomeDbApplied && issuesByHomeDb[selectedHomeDb]) {
-            urlHomeDbApplied = true;
-          }
-
-          applyFilters();
-        })
-        .catch((error) =>
-          console.error("Error loading data from " + url, error)
+    if (!selectedDb) {
+      if (summaryData?.sources) {
+        const firstWithIssues = Object.keys(summaryData.sources).find(
+          (s) => summaryData.sources[s] > 0
         );
-    });
-    allPromises.push(...issuePromises);
-
-    // Wait for all data fetching to complete
-    Promise.allSettled(allPromises).then(() => {
-      dataLoadingComplete = true;
-      globalLoader.classList.remove("visible");
-      if (selectedHomeDb && !urlHomeDbApplied) {
-        selectedHomeDb = "";
-        updateURL("", true);
+        if (firstWithIssues) {
+          selectedDb = firstWithIssues;
+          updateURL(selectedDb, true);
+        }
       }
-      applyFilters(); // Final render
-    });
+    }
+
+    renderFilterDropdowns();
+    setupEventListeners();
+
+    // 3. Load only the selected source's findings if a database is selected
+    if (selectedDb) {
+      currentSourceIssues = await fetchSourceFindings(selectedDb);
+    } else {
+      currentSourceIssues = [];
+    }
+    dataLoadingComplete = true;
+    globalLoader.classList.remove("visible");
+    updateFilterSelectedLabels();
+    applyFilters();
   }
 
-  function processAndDisplayData() {
-    applyFilters();
+  function setupEventListeners() {
+    searchInput.addEventListener("input", () => {
+      const val = searchInput.value.trim().toUpperCase();
+      // Check if search prefix matches a different database
+      for (const [prefix, src] of Object.entries(prefixToSource)) {
+        if (val.startsWith(prefix) && src !== selectedDb) {
+          selectSource(src);
+          return;
+        }
+      }
+      applyFilters();
+    });
 
-    searchInput.addEventListener("input", applyFilters);
     modifiedHeader.addEventListener("click", () => {
       sortDirection = sortDirection === "asc" ? "desc" : "asc";
       const icon = modifiedHeader.querySelector(".material-icons");
@@ -201,109 +372,37 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
     homeDbFilterOptions.addEventListener("click", (e) => {
-      if (e.target.classList.contains("filter-option")) {
-        const { value, count } = e.target.dataset;
-        selectedHomeDb = value;
-        homeDbFilterSelected.textContent = `${value} (${count} issues)`;
-        urlHomeDbApplied = true;
-        updateURL(selectedHomeDb);
-        applyFilters();
+      const option = e.target.closest(".filter-option");
+      if (option) {
+        const { value } = option.dataset;
+        selectSource(value);
       }
     });
 
     findingsFilterOptions.addEventListener("click", (e) => {
-      if (e.target.classList.contains("filter-option")) {
-        const { value, name, count } = e.target.dataset;
+      const option = e.target.closest(".filter-option");
+      if (option) {
+        const { value, name, count } = option.dataset;
         selectedFinding = value;
-        findingsFilterSelected.textContent = `${name} (${count} issues)`;
+        findingsFilterSelected.textContent = count ? `${name} (${count} issues)` : (name || "All Findings");
         applyFilters();
       }
     });
   }
 
   function applyFilters() {
-    const searchTerm = searchInput.value.toLowerCase();
+    const searchTerm = searchInput.value.trim().toLowerCase();
 
-    filteredIssues = allIssues.filter((issue) => {
+    filteredIssues = currentSourceIssues.filter((issue) => {
       const bugIdMatch = issue.bug_id.toLowerCase().includes(searchTerm);
-      const homeDbMatch =
-        !selectedHomeDb || issue.source === selectedHomeDb;
       const findingMatch =
         !selectedFinding || issue.findings.includes(selectedFinding);
-      return bugIdMatch && homeDbMatch && findingMatch;
+      return bugIdMatch && findingMatch;
     });
 
     currentPage = 1;
     sortIssues();
-    updateDynamicFilterCounts();
     displayIssues();
-  }
-
-  function updateDynamicFilterCounts() {
-    const searchTerm = searchInput.value.toLowerCase();
-
-    // Update Findings counts
-    const issuesForFindingsCount = allIssues.filter(
-      (issue) =>
-        (!selectedHomeDb || issue.source === selectedHomeDb) &&
-        issue.bug_id.toLowerCase().includes(searchTerm)
-    );
-    const findingsCount = issuesForFindingsCount.reduce((acc, issue) => {
-      issue.findings.forEach((finding) => {
-        acc[finding] = (acc[finding] || 0) + 1;
-      });
-      return acc;
-    }, {});
-
-    findingsFilterOptions.innerHTML = `<div class="filter-option" data-value="">All (${issuesForFindingsCount.length})</div>`;
-    for (const [finding, count] of Object.entries(findingsCount).sort((a, b) =>
-      a[0].localeCompare(b[0])
-    )) {
-      const name = finding.replace("IMPORT_FINDING_TYPE_", "");
-      const option = document.createElement("div");
-      option.className = "filter-option";
-      option.dataset.value = finding;
-      option.dataset.name = name;
-      option.dataset.count = count;
-      option.textContent = `${name} (${count})`;
-      findingsFilterOptions.appendChild(option);
-    }
-    if (!selectedFinding) {
-      findingsFilterSelected.textContent = `All (${issuesForFindingsCount.length} issues)`;
-    }
-
-    // Update Home Database counts
-    const issuesForHomeDbCount = allIssues.filter(
-      (issue) =>
-        (!selectedFinding || issue.findings.includes(selectedFinding)) &&
-        issue.bug_id.toLowerCase().includes(searchTerm)
-    );
-    const homeDbCount = issuesForHomeDbCount.reduce((acc, issue) => {
-      acc[issue.source] = (acc[issue.source] || 0) + 1;
-      return acc;
-    }, {});
-
-    homeDbFilterOptions.innerHTML = `<div class="filter-option" data-value="">All (${issuesForHomeDbCount.length})</div>`;
-    for (const homeDb of Object.keys(issuesByHomeDb).sort()) {
-      const count = homeDbCount[homeDb] || 0;
-      const option = document.createElement("div");
-      option.className = "filter-option";
-      option.dataset.value = homeDb;
-      option.dataset.count = count;
-      option.textContent = `${homeDb} (${count})`;
-      homeDbFilterOptions.appendChild(option);
-    }
-    if (selectedHomeDb) {
-      const selectedOption = homeDbFilterOptions.querySelector(
-        `[data-value="${selectedHomeDb}"]`
-      );
-      if (selectedOption) {
-        const { value, count } = selectedOption.dataset;
-        homeDbFilterSelected.textContent = `${value} (${count} issues)`;
-      }
-    } else {
-      homeDbFilterSelected.textContent = `All (${issuesForHomeDbCount.length} issues)`;
-    }
   }
 
   function sortIssues() {
@@ -323,6 +422,13 @@ document.addEventListener("DOMContentLoaded", function () {
       .getElementById("issues-table")
       .getElementsByTagName("tbody")[0];
     tableBody.innerHTML = "";
+
+    if (!selectedDb) {
+      tableBody.innerHTML =
+        '<tr><td colspan="3">Select a database from the dropdown above to view linter findings.</td></tr>';
+      setupPagination();
+      return;
+    }
 
     const startIndex = (currentPage - 1) * issuesPerPage;
     const endIndex = startIndex + issuesPerPage;
@@ -536,15 +642,29 @@ document.addEventListener("DOMContentLoaded", function () {
 
 
     // Display finding data
-    const details = findingDetails[bugId];
-    const findingsEl = document.getElementById(findingsJsonId);
-    if (details?.length) {
-      findingsEl.textContent = ''; // Clear "Loading..."
-      findingsEl.appendChild(formatFindings(details, bugId));
-    } else {
-      findingsEl.textContent =
-          "No linter findings available for this vulnerability.";
-    }
+    (async () => {
+      const issue = currentSourceIssues.find((i) => i.bug_id === bugId);
+      const source = issue?.source || selectedDb;
+      if (source) {
+        await ensureLinterFindingsForSource(source);
+      }
+      const details = findingDetails[bugId];
+      const findingsEl = document.getElementById(findingsJsonId);
+      if (details?.length) {
+        findingsEl.textContent = ''; // Clear "Loading..."
+        findingsEl.appendChild(formatFindings(details, bugId));
+      } else if (issue?.findings?.length) {
+        findingsEl.textContent = '';
+        const fallbackDetails = issue.findings.map((f) => ({
+          Code: f.replace('IMPORT_FINDING_TYPE_', ''),
+          Message: `Vulnerability flagged with finding: ${f.replace('IMPORT_FINDING_TYPE_', '')}`,
+        }));
+        findingsEl.appendChild(formatFindings(fallbackDetails, bugId));
+      } else {
+        findingsEl.textContent =
+            "No linter findings available for this vulnerability.";
+      }
+    })();
   }
 
   /**

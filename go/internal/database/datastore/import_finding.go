@@ -137,6 +137,24 @@ func (s *ImportFindingsStore) UploadResult(ctx context.Context, source string, d
 	return nil
 }
 
+// UploadSummary uploads the aggregate summary JSON (summary.json) to the GCS results bucket.
+func (s *ImportFindingsStore) UploadSummary(ctx context.Context, data []byte) error {
+	bucket := s.storageClient.Bucket(s.bucketName)
+	targetPath := filepath.Join(s.prefix, "summary.json")
+	w := bucket.Object(targetPath).NewWriter(ctx)
+	w.ContentType = "application/json"
+	if _, err := w.Write(data); err != nil {
+		w.Close()
+		return fmt.Errorf("failed to write summary to GCS: %w", err)
+	}
+
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("failed to close GCS writer: %w", err)
+	}
+
+	return nil
+}
+
 func (s *ImportFindingsStore) ListResultSources(ctx context.Context) ([]string, error) {
 	bucket := s.storageClient.Bucket(s.bucketName)
 	var objects []string

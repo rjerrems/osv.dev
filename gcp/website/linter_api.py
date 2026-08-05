@@ -73,6 +73,33 @@ def list_sources():
     return None
 
 
+@blueprint.route('/summary')
+def get_summary():
+  """Get linter summary metrics (total counts, per-source counts, per-finding counts)."""
+  client = _get_storage_client()
+  try:
+    bucket = client.bucket(LINTER_BUCKET)
+    blob_path = f'{LINTER_PREFIX}summary.json'
+    blob = bucket.blob(blob_path)
+
+    if not blob.exists():
+      abort(404, description="No summary found")
+      return None
+
+    content = blob.download_as_text()
+    return jsonify(json.loads(content))
+  except json.JSONDecodeError:
+    logging.error('Invalid JSON in linter summary')
+    abort(500, description="Invalid summary data")
+    return None
+  except Exception as e:
+    if hasattr(e, 'code') and e.code == 404:
+      raise e
+    logging.error('Failed to get linter summary: %s', e)
+    abort(500, description="Failed to retrieve summary")
+    return None
+
+
 @blueprint.route('/<source>')
 def get_findings(source):
   """Get linter findings for a specific source."""

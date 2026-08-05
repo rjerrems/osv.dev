@@ -53,6 +53,9 @@ type ImportFindingsStore interface {
 	// UploadResult uploads the JSON results for a given source to GCS.
 	UploadResult(ctx context.Context, source string, data []byte) error
 
+	// UploadSummary uploads the aggregate summary JSON to GCS.
+	UploadSummary(ctx context.Context, data []byte) error
+
 	// ListResultSources lists all sources that have linter results in the GCS bucket.
 	ListResultSources(ctx context.Context) ([]string, error)
 

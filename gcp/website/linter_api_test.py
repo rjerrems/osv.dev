@@ -85,6 +85,46 @@ class LinterApiTest(unittest.TestCase):
     response = self.client.get('/linter-findings/source1')
     self.assertEqual(response.status_code, 404)
 
+  @mock.patch('linter_api._get_storage_client')
+  def test_get_summary(self, mock_get_client):
+    """Test get_summary."""
+    mock_client = mock.Mock()
+    mock_get_client.return_value = mock_client
+    mock_bucket = mock.Mock()
+    mock_client.bucket.return_value = mock_bucket
+
+    mock_blob = mock.Mock()
+    mock_bucket.blob.return_value = mock_blob
+    mock_blob.exists.return_value = True
+    mock_blob.download_as_text.return_value = '{"total_records": 10, "sources": {"source1": 10}, "findings": {}}'
+
+    response = self.client.get('/linter-findings/summary')
+    self.assertEqual(response.status_code, 200)
+    self.assertEqual(response.json, {
+        'total_records': 10,
+        'sources': {
+            'source1': 10
+        },
+        'findings': {}
+    })
+
+    mock_bucket.blob.assert_called_with('linter-result/summary.json')
+
+  @mock.patch('linter_api._get_storage_client')
+  def test_get_summary_not_found(self, mock_get_client):
+    """Test get_summary not found."""
+    mock_client = mock.Mock()
+    mock_get_client.return_value = mock_client
+    mock_bucket = mock.Mock()
+    mock_client.bucket.return_value = mock_bucket
+
+    mock_blob = mock.Mock()
+    mock_bucket.blob.return_value = mock_blob
+    mock_blob.exists.return_value = False
+
+    response = self.client.get('/linter-findings/summary')
+    self.assertEqual(response.status_code, 404)
+
 
 if __name__ == '__main__':
   unittest.main()

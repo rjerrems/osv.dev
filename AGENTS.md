@@ -62,9 +62,13 @@ These models are defined in Python ([`osv/models.py`](osv/models.py)) and mirror
 ## Setup Commands
 The project uses `poetry` for Python dependency management, `pnpm` for website frontend, and Standard Go modules for Go.
 
+- **Python Virtual Environment (`.venv`)**:
+  > [!IMPORTANT]
+  > Always use the virtual environment located at the root of the project (`.venv`). When running commands like `make build-protos`, `poetry run ...`, or any Python scripts, ensure `.venv/bin` is in your PATH and VIRTUAL_ENV is set (e.g., `export PATH=$PWD/.venv/bin:$PATH export VIRTUAL_ENV=$PWD/.venv` or `PATH=$PWD/.venv/bin:$PATH VIRTUAL_ENV=$PWD/.venv make build-protos`).
+
 - **Install Python Dependencies**:
   ```bash
-  poetry install
+  PATH=$PWD/.venv/bin:$PATH VIRTUAL_ENV=$PWD/.venv poetry install
   ```
 - **Install Go Dependencies**:
   There are multiple Go modules in this monorepo. Run `go mod download` from within the respective directory (`go/`, `vulnfeeds/`, or `bindings/go/`) depending on what you are working on:
@@ -81,7 +85,7 @@ The project uses `poetry` for Python dependency management, `pnpm` for website f
   ```
 - **Build Protos**:
   ```bash
-  make build-protos
+  PATH=$PWD/.venv/bin:$PATH VIRTUAL_ENV=$PWD/.venv make build-protos
   ```
 
 ---
@@ -91,7 +95,7 @@ Always format and lint your code before proposing changes. The repository provid
 
 - **Run Linters & Format Checks**:
   ```bash
-  poetry run tools/lint_and_format.sh
+  PATH=$PWD/.venv/bin:$PATH VIRTUAL_ENV=$PWD/.venv poetry run tools/lint_and_format.sh
   ```
   *Note: This script only checks for violations and does not automatically format code.*
 
@@ -100,9 +104,9 @@ Always format and lint your code before proposing changes. The repository provid
 - Linter: `pylint` (config: [`.pylintrc`](.pylintrc))
 - **Formatting Command**: To automatically format Python files, run:
   ```bash
-  poetry run yapf -i <path_to_file>.py
+  PATH=$PWD/.venv/bin:$PATH VIRTUAL_ENV=$PWD/.venv poetry run yapf -i <path_to_file>.py
   ```
-- **Rule**: When running Python scripts, always use `poetry run`.
+- **Rule**: When running Python scripts, always use the root `.venv` and `poetry run`.
 
 ### Go Standards
 - Linter: `golangci-lint` (run automatically by the lint script per module).
